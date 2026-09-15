@@ -633,6 +633,12 @@ interface Window {
 			prompted: boolean;
 			error?: string;
 		}>;
+		getCursorHelperPermissionStatus: () => Promise<{
+			success: boolean;
+			accessibility: boolean;
+			inputEvents: boolean;
+			error?: string;
+		}>;
 		getScreenRecordingPermissionStatus: () => Promise<{
 			success: boolean;
 			status: string;
@@ -946,6 +952,7 @@ interface ProcessedDesktopSource {
 }
 
 interface CursorTelemetryPoint {
+	caret?: { cx: number; cy: number } | null;
 	timeMs: number;
 	cx: number;
 	cy: number;

@@ -146,7 +146,9 @@ export function useFreshRecordingAutoZoom({
 
 		autoSuggestedVideoPathRef.current = null;
 		setZoomRegions((current) => {
-			const next = current.filter((region) => region.mode !== "auto");
+			const next = current.filter(
+				(region) => region.mode !== "auto" && region.mode !== "typing",
+			);
 			return next.length === current.length ? current : next;
 		});
 	}, [

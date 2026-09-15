@@ -13,7 +13,7 @@ interface OverlayUpdateParams {
 export function updateOverlayIndicator(params: OverlayUpdateParams) {
 	const { overlayEl, indicatorEl, region, focusOverride, baseMask, isPlaying } = params;
 
-	if (!region || region.mode === "auto") {
+	if (!region || region.mode === "auto" || region.mode === "typing") {
 		indicatorEl.style.display = "none";
 		overlayEl.style.pointerEvents = "none";
 		return;

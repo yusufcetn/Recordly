@@ -42,6 +42,14 @@ import {
 } from "./telemetry";
 
 describe("cursor telemetry pause clock", () => {
+	it("persists caret geometry but discards invalid coordinates", () => {
+		const samples = normalizeCursorTelemetrySamples([
+			{ timeMs: 0, cx: 0.2, cy: 0.3, caret: { cx: 0.6, cy: 0.3 } },
+			{ timeMs: 50, cx: 0.2, cy: 0.3, caret: { cx: Number.NaN, cy: 0.3 } },
+			{ timeMs: 100, cx: 0.2, cy: 0.3, caret: null },
+		]);
+		expect(samples.map((s) => s.caret)).toEqual([{ cx: 0.6, cy: 0.3 }, null, null]);
+	});
 	beforeEach(() => {
 		writeFile.mockReset();
 		rm.mockReset();

@@ -99,6 +99,8 @@ export type CursorInteractionType =
 	| "mouseup";
 
 export interface CursorTelemetryPoint {
+	/** Normalized text insertion point; null when typing is inactive/unavailable. */
+	caret?: { cx: number; cy: number } | null;
 	timeMs: number;
 	cx: number;
 	cy: number;

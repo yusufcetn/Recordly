@@ -219,3 +219,80 @@ describe("buildInteractionZoomSuggestions (click-cluster logic)", () => {
 		expect(s.end).toBeLessThanOrEqual(1_000);
 	});
 });
+
+function makeTyping(startMs: number, endMs: number, cx = 0.3, cy = 0.05): CursorTelemetryPoint[] {
+	const samples: CursorTelemetryPoint[] = [];
+	for (let timeMs = startMs; timeMs <= endMs; timeMs += 33) {
+		samples.push({ ...makeMove(timeMs, 0.48, 0.06), caret: { cx, cy } });
+	}
+	return samples;
+}
+
+describe("buildInteractionZoomSuggestions (typing)", () => {
+	it("adds a typing zoom for typing without any clicks", () => {
+		const result = buildInteractionZoomSuggestions({
+			cursorTelemetry: withMoves(makeTyping(9_000, 12_000), TOTAL_MS),
+			totalMs: TOTAL_MS,
+			defaultDurationMs: 3_000,
+		});
+
+		expect(result.status).toBe("ok");
+		expect(result.suggestions).toEqual([
+			{
+				start: 9_000 - CLICK_CLUSTER_PAD_MS,
+				end: 12_000 - (3_000 % 33) + CLICK_CLUSTER_PAD_MS,
+				focus: { cx: 0.3, cy: 0.05 },
+				mode: "typing",
+			},
+		]);
+	});
+
+	it("keeps short typing pauses in one typing zoom", () => {
+		const result = buildInteractionZoomSuggestions({
+			cursorTelemetry: withMoves(
+				[...makeTyping(9_000, 10_500), ...makeTyping(11_800, 13_300)],
+				TOTAL_MS,
+			),
+			totalMs: TOTAL_MS,
+			defaultDurationMs: 3_000,
+		});
+
+		expect(result.suggestions).toHaveLength(1);
+		expect(result.suggestions[0].mode).toBe("typing");
+	});
+
+	it("absorbs an overlapping click zoom into the typing zoom", () => {
+		const result = buildInteractionZoomSuggestions({
+			cursorTelemetry: withMoves([makeClick(8_800), ...makeTyping(9_000, 12_000)], TOTAL_MS),
+			totalMs: TOTAL_MS,
+			defaultDurationMs: 3_000,
+		});
+
+		expect(result.suggestions).toHaveLength(1);
+		expect(result.suggestions[0]).toMatchObject({
+			start: 8_800 - CLICK_CLUSTER_PAD_MS,
+			mode: "typing",
+			focus: { cx: 0.3, cy: 0.05 },
+		});
+	});
+
+	it("keeps separate click zooms in auto mode", () => {
+		const result = buildInteractionZoomSuggestions({
+			cursorTelemetry: withMoves([makeClick(2_000), ...makeTyping(9_000, 12_000)], TOTAL_MS),
+			totalMs: TOTAL_MS,
+			defaultDurationMs: 3_000,
+		});
+
+		expect(result.suggestions.map((s) => s.mode)).toEqual(["auto", "typing"]);
+	});
+
+	it("ignores a stray caret blip", () => {
+		const result = buildInteractionZoomSuggestions({
+			cursorTelemetry: withMoves(makeTyping(9_000, 9_100), TOTAL_MS),
+			totalMs: TOTAL_MS,
+			defaultDurationMs: 3_000,
+		});
+
+		expect(result.status).toBe("no-interactions");
+	});
+});

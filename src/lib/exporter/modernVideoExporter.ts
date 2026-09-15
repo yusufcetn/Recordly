@@ -2311,7 +2311,10 @@ export class ModernVideoExporter {
 				zoomInDurationMs: this.config.zoomInDurationMs,
 				zoomOutDurationMs: this.config.zoomOutDurationMs,
 				zoomClassicMode: this.config.zoomClassicMode,
-				cursorTelemetry: cursorTelemetry ?? [],
+				// Camera needs original caret samples even when the mouse overlay is hidden.
+				cursorTelemetry: zoomRegions.some((region) => region.mode === "typing")
+					? (this.config.cursorTelemetry ?? [])
+					: (cursorTelemetry ?? []),
 				cursorFollowCamera,
 			});
 

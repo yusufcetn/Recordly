@@ -406,6 +406,136 @@ if CommandLine.arguments.contains("--export-images") {
 	exit(0)
 }
 
+// Report what TCC grants this helper process. The app's own
+// isTrustedAccessibilityClient() check can pass while the helper is denied:
+// when the app's code signature identifier does not match its bundle ID, TCC
+// attributes the helper to the app's executable path instead of its bundle ID.
+// CGEvent.tapCreate is not a usable signal here: a listen-only tap is created
+// even when TCC denies it, and then simply never receives events.
+if CommandLine.arguments.contains("--check-permissions") {
+	let accessibilityTrusted = AXIsProcessTrusted()
+	print("PERMISSION:accessibility:\(accessibilityTrusted ? 1 : 0)")
+	print("PERMISSION:input-events:\(accessibilityTrusted || CGPreflightListenEventAccess() ? 1 : 0)")
+	fflush(stdout)
+	exit(0)
+}
+
+let caretMessagingTimeout: Float = 0.08
+
+struct TextCaret {
+	let element: AXUIElement
+	let rect: CGRect
+}
+
+func frontmostApplicationPid() -> pid_t? {
+	if Thread.isMainThread {
+		return NSWorkspace.shared.frontmostApplication?.processIdentifier
+	}
+	return DispatchQueue.main.sync { NSWorkspace.shared.frontmostApplication?.processIdentifier }
+}
+
+// Query the frontmost app rather than the system-wide element: a messaging
+// timeout set on the system-wide element becomes the global timeout for every
+// AX call in this process, including cursor-type detection.
+var cachedCaretApplication: (pid: pid_t, element: AXUIElement)?
+func frontmostApplicationElement() -> AXUIElement? {
+	guard let pid = frontmostApplicationPid() else {
+		cachedCaretApplication = nil
+		return nil
+	}
+	if let cached = cachedCaretApplication, cached.pid == pid {
+		return cached.element
+	}
+	let element = AXUIElementCreateApplication(pid)
+	AXUIElementSetMessagingTimeout(element, caretMessagingTimeout)
+	cachedCaretApplication = (pid, element)
+	return element
+}
+
+// Only geometry is emitted: never read AXValue or the typed characters.
+func textCaret(in root: AXUIElement) -> TextCaret? {
+	var focused: CFTypeRef?
+	guard AXUIElementCopyAttributeValue(root, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+		let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+	let element = focused as! AXUIElement
+	AXUIElementSetMessagingTimeout(element, caretMessagingTimeout)
+	// Secure inputs and non-editable content must not move the camera.
+	let role = attributeString(element, kAXRoleAttribute) ?? ""
+	let subrole = attributeString(element, kAXSubroleAttribute) ?? ""
+	guard !subrole.lowercased().contains("secure"),
+		["AXTextField", "AXTextArea", "AXComboBox"].contains(role)
+			|| attributeBool(element, axEditableAttribute) == true else { return nil }
+	var value: CFTypeRef?
+	guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
+		let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+	var range = CFRange()
+	guard AXValueGetValue(value as! AXValue, .cfRange, &range), range.location >= 0,
+		range.length == 0 else { return nil }
+	guard let parameter = AXValueCreate(.cfRange, &range) else { return nil }
+	var result: CFTypeRef?
+	guard AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString, parameter, &result) == .success,
+		let result, CFGetTypeID(result) == AXValueGetTypeID() else { return nil }
+	var rect = CGRect.zero
+	guard AXValueGetValue(result as! AXValue, .cgRect, &rect),
+		rect.origin.x.isFinite, rect.origin.y.isFinite, rect.width.isFinite,
+		rect.height.isFinite, rect.width >= 0, rect.width <= 32,
+		rect.height > 0, rect.height < 200 else { return nil }
+	return TextCaret(element: element, rect: rect)
+}
+
+// A one-shot diagnostic for browser compatibility; it prints geometry only.
+if let index = CommandLine.arguments.firstIndex(of: "--probe-caret") {
+	var root = frontmostApplicationElement()
+	if CommandLine.arguments.count > index + 1,
+		let app = NSRunningApplication.runningApplications(withBundleIdentifier: CommandLine.arguments[index + 1]).first {
+		root = AXUIElementCreateApplication(app.processIdentifier)
+		AXUIElementSetMessagingTimeout(root!, caretMessagingTimeout)
+	}
+	if let root, let caret = textCaret(in: root) {
+		print("CARET:\(caret.rect.midX):\(caret.rect.midY)")
+	} else {
+		print("CARET:none trusted=\(AXIsProcessTrusted())")
+	}
+	exit(0)
+}
+
+let typingLock = NSLock()
+var lastTypingTime: TimeInterval = 0
+func markTyping(_ active: Bool) {
+	typingLock.lock()
+	lastTypingTime = active ? ProcessInfo.processInfo.systemUptime : 0
+	typingLock.unlock()
+}
+
+var previousCaret: TextCaret?
+func emitTextCaret() {
+	let caret = frontmostApplicationElement().flatMap { textCaret(in: $0) }
+	if let caret {
+		if let previous = previousCaret, CFEqual(previous.element, caret.element) {
+			// Observe insertion-point movement instead of listening to keystrokes.
+			// This also works for paste, IME input and browser automation.
+			if abs(caret.rect.midX - previous.rect.midX) > 0.2
+				|| abs(caret.rect.midY - previous.rect.midY) > 0.2 {
+				markTyping(true)
+			}
+		} else {
+			markTyping(false)
+		}
+	} else {
+		markTyping(false)
+	}
+	previousCaret = caret
+	typingLock.lock()
+	let recentlyTyped = ProcessInfo.processInfo.systemUptime - lastTypingTime < 1.0
+	typingLock.unlock()
+	if recentlyTyped, let caret {
+		print("CARET:\(caret.rect.midX):\(caret.rect.midY)")
+	} else {
+		print("CARET:none")
+	}
+	fflush(stdout)
+}
+
 func mouseInteractionCallback(
 	proxy: CGEventTapProxy,
 	type: CGEventType,
@@ -416,12 +546,14 @@ func mouseInteractionCallback(
 	let button: Int
 	switch type {
 	case .leftMouseDown:
+		markTyping(false)
 		action = "mousedown"
 		button = 1
 	case .leftMouseUp:
 		action = "mouseup"
 		button = 1
 	case .rightMouseDown:
+		markTyping(false)
 		action = "mousedown"
 		button = 2
 	case .rightMouseUp:
@@ -447,6 +579,9 @@ func mouseInteractionCallback(
 	fflush(stdout)
 	return Unmanaged.passUnretained(event)
 }
+
+print("PERMISSION:accessibility:\(AXIsProcessTrusted() ? 1 : 0)")
+fflush(stdout)
 
 let mouseEventTypes: [CGEventType] = [
 	.leftMouseDown,
@@ -474,6 +609,8 @@ if let mouseEventTap,
 } else {
 	fputs("Mouse interaction event tap unavailable; click telemetry disabled\n", stderr)
 	fflush(stderr)
+	print("PERMISSION:input-events:0")
+	fflush(stdout)
 }
 
 var lastState = ""
@@ -490,6 +627,7 @@ let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .uti
 timer.schedule(deadline: .now(), repeating: .milliseconds(50))
 timer.setEventHandler {
 	emitStateIfNeeded()
+	emitTextCaret()
 }
 timer.resume()
 

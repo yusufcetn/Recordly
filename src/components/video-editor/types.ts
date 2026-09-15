@@ -5,7 +5,7 @@ export interface ZoomFocus {
 	cy: number; // normalized vertical center (0-1)
 }
 
-export type ZoomMode = "auto" | "manual";
+export type ZoomMode = "auto" | "manual" | "typing";
 
 export interface ZoomRegion {
 	id: string;
@@ -17,6 +17,8 @@ export interface ZoomRegion {
 }
 
 export interface CursorTelemetryPoint {
+	/** Separate from the mouse coordinates so cursor rendering stays unchanged. */
+	caret?: ZoomFocus | null;
 	timeMs: number;
 	cx: number;
 	cy: number;

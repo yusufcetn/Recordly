@@ -17,6 +17,7 @@ import type {
 	SpeedRegion,
 	TrimRegion,
 	ZoomFocus,
+	ZoomMode,
 	ZoomRegion,
 } from "../types";
 import KeyframeMarkers from "./components/markers/KeyframeMarkers";
@@ -42,7 +43,7 @@ export interface TimelineEditorProps {
 	disableSuggestedZooms?: boolean;
 	zoomRegions: ZoomRegion[];
 	onZoomAdded: (span: Span) => void;
-	onZoomSuggested?: (span: Span, focus: ZoomFocus) => void;
+	onZoomSuggested?: (span: Span, focus: ZoomFocus, mode: ZoomMode) => void;
 	onZoomSpanChange: (id: string, span: Span) => void;
 	onZoomDelete: (id: string) => void;
 	selectedZoomId: string | null;

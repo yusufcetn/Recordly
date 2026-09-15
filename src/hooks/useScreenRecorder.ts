@@ -373,6 +373,40 @@ async function createAudioInputDeviceSnapshot(): Promise<
 	return audioInputs.length > 0 ? audioInputs : null;
 }
 
+/**
+ * The app passing its own Accessibility check does not guarantee the cursor
+ * helper is allowed too (macOS can attribute the helper to a different identity),
+ * and without it recordings silently lose clicks and caret positions.
+ */
+async function confirmCursorHelperPermissions(startup: boolean): Promise<boolean> {
+	const helperPermission = await window.electronAPI.getCursorHelperPermissionStatus();
+	if (!helperPermission.success) {
+		// A failed check must not block recording; the helper logs its own warnings.
+		console.warn("Failed to check cursor helper permissions:", helperPermission.error);
+		return true;
+	}
+
+	if (helperPermission.accessibility && helperPermission.inputEvents) {
+		return true;
+	}
+
+	const message =
+		'Recordly\'s cursor helper is not allowed to use Accessibility, so clicks and typing will not be captured. Auto-zoom suggestions, click effects and typing zooms will be missing.\n\nIn System Settings > Privacy & Security > Accessibility, remove Recordly with the "-" button and add it again, then quit and reopen Recordly.';
+
+	if (startup) {
+		await window.electronAPI.openAccessibilityPreferences();
+		alert(message);
+		return true;
+	}
+
+	if (confirm(`${message}\n\nRecord anyway?`)) {
+		return true;
+	}
+
+	await window.electronAPI.openAccessibilityPreferences();
+	return false;
+}
+
 export function useScreenRecorder(): UseScreenRecorderReturn {
 	const [recording, setRecording] = useState(false);
 	const [paused, setPaused] = useState(false);
@@ -569,12 +603,12 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		}
 
 		if (accessibilityPermission.trusted) {
-			return true;
+			return confirmCursorHelperPermissions(options.startup === true);
 		}
 
 		const requestedAccessibility = await window.electronAPI.requestAccessibilityPermission();
 		if (requestedAccessibility.success && requestedAccessibility.trusted) {
-			return true;
+			return confirmCursorHelperPermissions(options.startup === true);
 		}
 
 		await window.electronAPI.openAccessibilityPreferences();

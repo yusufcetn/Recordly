@@ -1,6 +1,6 @@
 import type { Span } from "dnd-timeline";
 import { useCallback, useEffect, useMemo } from "react";
-import type { CursorTelemetryPoint, ZoomFocus, ZoomRegion } from "../../../types";
+import type { CursorTelemetryPoint, ZoomFocus, ZoomMode, ZoomRegion } from "../../../types";
 import { buildInteractionZoomSuggestions } from "../../zoomSuggestionUtils";
 import { timelineNotifications } from "../utils/timelineNotifications";
 
@@ -21,7 +21,7 @@ interface UseTimelineZoomActionsParams {
 	autoSuggestZoomsTrigger: number;
 	onAutoSuggestZoomsConsumed?: () => void;
 	onZoomAdded: (span: Span) => void;
-	onZoomSuggested?: (span: Span, focus: ZoomFocus) => void;
+	onZoomSuggested?: (span: Span, focus: ZoomFocus, mode: ZoomMode) => void;
 }
 
 export function useTimelineZoomActions({
@@ -171,7 +171,7 @@ export function useTimelineZoomActions({
 		}
 
 		for (const region of result.suggestions) {
-			onZoomSuggested({ start: region.start, end: region.end }, region.focus);
+			onZoomSuggested({ start: region.start, end: region.end }, region.focus, region.mode);
 		}
 
 		timelineNotifications.success(

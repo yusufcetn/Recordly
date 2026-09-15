@@ -7,6 +7,8 @@ import {
 	SNAP_TO_EDGES_RATIO_AUTO,
 } from "./cursorFollowCamera";
 import { findDominantRegion } from "./zoomRegionUtils";
+import { caretAtTime } from "./caretTracking";
+import { interpolateCursorPosition } from "./cursorRenderer";
 
 export type SceneZoomTarget = {
 	scale: number;
@@ -83,13 +85,35 @@ export function resolveSceneZoomTarget({
 	});
 
 	if (!region || strength <= 0) {
+		cursorFollowCamera.typingMouseAnchor = undefined;
 		return { scale: 1, focus: DEFAULT_FOCUS, progress: 0 };
 	}
 
 	const scale = blendedScale ?? ZOOM_DEPTH_SCALES[region.depth];
 	let focus = region.focus;
+	let typingFocus: ZoomFocus | null = null;
+	if (timeMs < cursorFollowCamera.lastTimeMs || region.mode !== "typing") {
+		cursorFollowCamera.typingMouseAnchor = undefined;
+	}
+	if (region.mode === "typing" && cursorTelemetry?.length) {
+		typingFocus = caretAtTime(cursorTelemetry, timeMs);
+		const mouse = interpolateCursorPosition(cursorTelemetry, timeMs);
+		if (typingFocus && mouse) {
+			cursorFollowCamera.typingMouseAnchor = { cx: mouse.cx, cy: mouse.cy };
+		} else if (mouse && cursorFollowCamera.typingMouseAnchor) {
+			const anchor = cursorFollowCamera.typingMouseAnchor;
+			if (
+				Math.hypot(mouse.cx - anchor.cx, mouse.cy - anchor.cy) < 0.012 &&
+				cursorFollowCamera.initialized
+			) {
+				typingFocus = { cx: cursorFollowCamera.focusX, cy: cursorFollowCamera.focusY };
+			} else {
+				cursorFollowCamera.typingMouseAnchor = undefined;
+			}
+		}
+	}
 	if (
-		!zoomClassicMode &&
+		(!zoomClassicMode || region.mode === "typing") &&
 		region.mode !== "manual" &&
 		cursorTelemetry &&
 		cursorTelemetry.length > 0
@@ -101,7 +125,7 @@ export function resolveSceneZoomTarget({
 			scale,
 			strength,
 			region.focus,
-			{ snapToEdgesRatio: SNAP_TO_EDGES_RATIO_AUTO },
+			{ snapToEdgesRatio: SNAP_TO_EDGES_RATIO_AUTO, targetFocus: typingFocus },
 		);
 	}
 

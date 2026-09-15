@@ -1,4 +1,5 @@
 import { ipcMain, shell, systemPreferences } from "electron";
+import { checkCursorHelperPermissions } from "../cursor/helperPermissions";
 import { getMacPrivacySettingsUrl } from "../utils";
 
 export function registerPermissionHandlers() {
@@ -40,6 +41,8 @@ export function registerPermissionHandlers() {
 			prompted: true,
 		};
 	});
+
+	ipcMain.handle("get-cursor-helper-permission-status", () => checkCursorHelperPermissions());
 
 	ipcMain.handle("get-screen-recording-permission-status", () => {
 		if (process.platform !== "darwin") {

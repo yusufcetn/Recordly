@@ -88,6 +88,39 @@ afterEach(() => {
 });
 
 describe("ModernVideoExporter native static-layout eligibility", () => {
+	it("exports typing pans even with the mouse overlay disabled", () => {
+		const zoomRegions: ZoomRegion[] = [
+			{
+				id: "typing",
+				startMs: 0,
+				endMs: 4000,
+				depth: 4,
+				focus: { cx: 0.3, cy: 0.5 },
+				mode: "typing",
+			},
+		];
+		const cursorTelemetry = Array.from({ length: 121 }, (_, i) => ({
+			timeMs: (i * 1000) / 30,
+			cx: 0.2,
+			cy: 0.5,
+			caret: { cx: 0.3 + i / 300, cy: 0.5 },
+		}));
+		const exporter = createExporter({ zoomRegions, cursorTelemetry, showCursor: false });
+		const samples = exporter.getNativeStaticLayoutZoomTelemetry(
+			{
+				centerOffsetX: 0,
+				centerOffsetY: 0,
+				croppedDisplayWidth: 1920,
+				croppedDisplayHeight: 1080,
+			},
+			90,
+			undefined,
+		);
+		expect(samples).toHaveLength(90);
+		// Moving the camera right translates the video left at the same zoom level.
+		expect(samples![75].x).toBeLessThan(samples![45].x);
+		expect(samples![75].y).toBeCloseTo(samples![45].y, 0);
+	});
 	it("uses configured zoom transition durations for native telemetry", () => {
 		const zoomRegions: ZoomRegion[] = [
 			{

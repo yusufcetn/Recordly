@@ -34,6 +34,21 @@ describe("resolveVideoUrl", () => {
 });
 
 describe("normalizeProjectEditor", () => {
+	it("preserves Typing mode when reopening a saved project", () => {
+		const editor = normalizeProjectEditor({
+			zoomRegions: [
+				{
+					id: "typing",
+					startMs: 0,
+					endMs: 2000,
+					depth: 3,
+					focus: { cx: 0.5, cy: 0.5 },
+					mode: "typing",
+				},
+			],
+		});
+		expect(editor.zoomRegions[0].mode).toBe("typing");
+	});
 	it("defaults to 8% on macOS and square corners elsewhere", () => {
 		expect(getDefaultBorderRadiusPercent("MacIntel")).toBe(8);
 		expect(getDefaultBorderRadiusPercent("Win32")).toBe(0);

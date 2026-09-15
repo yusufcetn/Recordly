@@ -13,6 +13,8 @@ import {
 } from "../state";
 import type { CursorVisualType } from "../types";
 import { recordCursorMouseDown, recordCursorMouseUp } from "./interaction";
+import { acceptCaretMessage, resetCaretCapture } from "./caret";
+import { parseCursorHelperPermissionLine } from "./helperPermissions";
 
 export function emitCursorStateChanged(cursorType: CursorVisualType) {
 	BrowserWindow.getAllWindows().forEach((window) => {
@@ -28,6 +30,16 @@ export function handleCursorMonitorStdout(chunk: Buffer) {
 	setNativeCursorMonitorOutputBuffer(lines.pop() ?? "");
 
 	for (const line of lines) {
+		if (acceptCaretMessage(line)) continue;
+		const permission = parseCursorHelperPermissionLine(line);
+		if (permission) {
+			if (!permission.granted) {
+				console.warn(
+					`[CursorTelemetry] Native cursor monitor lacks ${permission.name} permission; clicks and caret tracking will not be captured.`,
+				);
+			}
+			continue;
+		}
 		const interactionMatch = line.match(/^INTERACTION:(mousedown|mouseup)(?::([123]))?$/);
 		if (interactionMatch) {
 			if (interactionMatch[1] === "mouseup") {
@@ -63,6 +75,7 @@ export function handleCursorMonitorStdout(chunk: Buffer) {
 }
 
 export function stopNativeCursorMonitor() {
+	resetCaretCapture();
 	setCurrentCursorVisualType("arrow");
 
 	if (!nativeCursorMonitorProcess) {
@@ -149,6 +162,7 @@ export async function startNativeCursorMonitor() {
 
 		spawned.once("close", () => {
 			if (nativeCursorMonitorProcess === spawned) {
+				resetCaretCapture();
 				setNativeCursorMonitorProcess(null);
 				setNativeCursorMonitorOutputBuffer("");
 				setCurrentCursorVisualType("arrow");

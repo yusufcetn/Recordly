@@ -28,7 +28,7 @@ interface ItemProps {
 	onSelect?: () => void;
 	onSelectId?: (id: string) => void;
 	zoomDepth?: number;
-	zoomMode?: "auto" | "manual";
+	zoomMode?: "auto" | "manual" | "typing";
 	speedValue?: number;
 	waveformPeaks?: AudioPeaksData | null;
 	waveformSegmentSpan?: Span;
@@ -277,7 +277,11 @@ export default function Item({
 									weight={zoomMode === "manual" ? "regular" : "fill"}
 								/>
 								<span className="text-[9px] font-medium tracking-tight whitespace-nowrap">
-									{zoomMode === "manual" ? "Manual" : "Auto"}
+									{zoomMode === "manual"
+										? "Manual"
+										: zoomMode === "typing"
+											? "Typing"
+											: "Auto"}
 								</span>
 							</div>
 						) : (

@@ -95,14 +95,14 @@ export function useZoomRegionCommands({
 	);
 
 	const handleZoomSuggested = useCallback(
-		(span: Span, focus: ZoomFocus) => {
+		(span: Span, focus: ZoomFocus, mode: ZoomMode = "auto") => {
 			const newRegion: ZoomRegion = {
 				id: `zoom-${nextZoomIdRef.current++}`,
 				startMs: Math.round(span.start),
 				endMs: Math.round(span.end),
 				depth: DEFAULT_AUTO_ZOOM_DEPTH,
 				focus: clampFocusToDepth(focus, DEFAULT_AUTO_ZOOM_DEPTH),
-				mode: "auto",
+				mode,
 			};
 			markFreshRecordingSuggestion();
 			setZoomRegions((current) => [...current, newRegion]);

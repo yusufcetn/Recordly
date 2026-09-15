@@ -490,7 +490,9 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 							),
 						},
 						mode:
-							region.mode === "auto" || region.mode === "manual"
+							region.mode === "auto" ||
+							region.mode === "manual" ||
+							region.mode === "typing"
 								? region.mode
 								: undefined,
 					};

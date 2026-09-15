@@ -1,0 +1,11 @@
+{
+  "extends": "./electron-builder.json5",
+  "publish": null,
+  "directories": {
+    "output": "release-typing"
+  },
+  "mac": {
+    "identity": "Recordly Local Code Signing",
+    "hardenedRuntime": false
+  }
+}

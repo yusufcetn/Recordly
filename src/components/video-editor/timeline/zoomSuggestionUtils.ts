@@ -1,4 +1,5 @@
-import type { CursorTelemetryPoint, ZoomFocus } from "../types";
+import { normalizeCaret } from "@/lib/caret";
+import type { CursorTelemetryPoint, ZoomFocus, ZoomMode } from "../types";
 
 export const MIN_DWELL_DURATION_MS = 450;
 export const MAX_DWELL_DURATION_MS = 2600;
@@ -27,6 +28,8 @@ export interface SuggestedZoomRegion {
 	start: number;
 	end: number;
 	focus: ZoomFocus;
+	/** "typing" regions follow the text caret; "auto" regions follow the mouse. */
+	mode: Extract<ZoomMode, "auto" | "typing">;
 }
 
 export type InteractionZoomSuggestionStatus =
@@ -71,6 +74,10 @@ export function shouldAutoApplyFreshRecordingZoomsForSource(
 export const CLICK_CLUSTER_MERGE_GAP_MS = 2500;
 /** Padding added before the first click and after the last click in a cluster. */
 export const CLICK_CLUSTER_PAD_MS = 500;
+/** Caret samples further apart than this split typing into separate zoom regions. */
+export const TYPING_SPAN_MERGE_GAP_MS = 2500;
+/** Typing shorter than this (a stray caret jump) does not earn its own zoom. */
+export const MIN_TYPING_SPAN_MS = 300;
 const EXPLICIT_CLICK_TYPES = new Set<NonNullable<CursorTelemetryPoint["interactionType"]>>([
 	"click",
 	"double-click",
@@ -94,6 +101,7 @@ function normalizeTelemetrySample(
 		cy: Math.max(0, Math.min(sample.cy, 1)),
 		interactionType: sample.interactionType,
 		cursorType: sample.cursorType,
+		...(sample.caret !== undefined ? { caret: normalizeCaret(sample.caret) } : {}),
 	};
 }
 
@@ -364,6 +372,53 @@ function buildClickClusters(
 	return clusters;
 }
 
+/**
+ * Groups samples that carry a caret position into typing spans. The native
+ * monitor only reports the caret while it is moving, so a gap in caret samples
+ * means the user paused typing or left the text field.
+ */
+function buildTypingSpans(
+	samples: CursorTelemetryPoint[],
+	mergeGapMs: number,
+): Array<{ firstMs: number; lastMs: number; focus: ZoomFocus }> {
+	const spans: Array<{ firstMs: number; lastMs: number; focus: ZoomFocus }> = [];
+	let current: { firstMs: number; lastMs: number; focus: ZoomFocus } | null = null;
+
+	for (const sample of samples) {
+		if (!sample.caret) continue;
+		if (current && sample.timeMs - current.lastMs <= mergeGapMs) {
+			current.lastMs = sample.timeMs;
+			continue;
+		}
+		if (current) spans.push(current);
+		current = { firstMs: sample.timeMs, lastMs: sample.timeMs, focus: sample.caret };
+	}
+	if (current) spans.push(current);
+
+	return spans.filter((span) => span.lastMs - span.firstMs >= MIN_TYPING_SPAN_MS);
+}
+
+/**
+ * Merges overlapping windows. Typing wins the merge: typing regions fall back to
+ * following the mouse while no caret is reported, so they cover clicks as well.
+ */
+function mergeOverlappingSuggestions(windows: SuggestedZoomRegion[]): SuggestedZoomRegion[] {
+	const merged: SuggestedZoomRegion[] = [];
+	for (const window of [...windows].sort((a, b) => a.start - b.start)) {
+		const previous = merged[merged.length - 1];
+		if (!previous || window.start >= previous.end) {
+			merged.push({ ...window });
+			continue;
+		}
+		previous.end = Math.max(previous.end, window.end);
+		if (previous.mode !== "typing" && window.mode === "typing") {
+			previous.mode = "typing";
+			previous.focus = window.focus;
+		}
+	}
+	return merged;
+}
+
 export function buildInteractionZoomSuggestions(params: {
 	cursorTelemetry: CursorTelemetryPoint[];
 	totalMs: number;
@@ -402,19 +457,35 @@ export function buildInteractionZoomSuggestions(params: {
 		(candidate) => candidate.source === "explicit",
 	);
 
-	if (clickCandidates.length === 0) {
+	const typingSpans = buildTypingSpans(normalizedSamples, TYPING_SPAN_MERGE_GAP_MS);
+
+	if (clickCandidates.length === 0 && typingSpans.length === 0) {
 		return { status: "no-interactions", suggestions: [] };
 	}
 
 	// Group nearby clicks into clusters, then derive zoom windows from those clusters
 	const clusters = buildClickClusters(clickCandidates, mergeGapMs);
+	const windows = mergeOverlappingSuggestions([
+		...clusters.map<SuggestedZoomRegion>((cluster) => ({
+			start: Math.max(0, cluster.firstMs - padMs),
+			end: Math.min(totalMs, cluster.lastMs + padMs),
+			focus: cluster.focus,
+			mode: "auto",
+		})),
+		...typingSpans.map<SuggestedZoomRegion>((span) => ({
+			start: Math.max(0, span.firstMs - padMs),
+			end: Math.min(totalMs, span.lastMs + padMs),
+			focus: span.focus,
+			mode: "typing",
+		})),
+	]);
 
 	const reserved = [...reservedSpans].sort((a, b) => a.start - b.start);
 	const suggestions: SuggestedZoomRegion[] = [];
 
-	for (const cluster of clusters) {
-		const regionStart = Math.max(0, cluster.firstMs - padMs);
-		const regionEnd = Math.min(totalMs, cluster.lastMs + padMs);
+	for (const window of windows) {
+		const regionStart = window.start;
+		const regionEnd = window.end;
 
 		if (regionEnd <= regionStart) {
 			continue;
@@ -429,11 +500,7 @@ export function buildInteractionZoomSuggestions(params: {
 		}
 
 		reserved.push({ start: regionStart, end: regionEnd });
-		suggestions.push({
-			start: regionStart,
-			end: regionEnd,
-			focus: cluster.focus,
-		});
+		suggestions.push(window);
 	}
 
 	if (suggestions.length === 0) {

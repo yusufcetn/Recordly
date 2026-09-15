@@ -10,6 +10,7 @@ import type {
 	SpeedRegion,
 	TrimRegion,
 	ZoomFocus,
+	ZoomMode,
 	ZoomRegion,
 } from "../../types";
 import type { TimelineShortcutBindings } from "../core/timelineTypes";
@@ -34,7 +35,7 @@ interface UseTimelineEditorRuntimeParams {
 	disableSuggestedZooms: boolean;
 	zoomRegions: ZoomRegion[];
 	onZoomAdded: (span: Span) => void;
-	onZoomSuggested?: (span: Span, focus: ZoomFocus) => void;
+	onZoomSuggested?: (span: Span, focus: ZoomFocus, mode: ZoomMode) => void;
 	onZoomSpanChange: (id: string, span: Span) => void;
 	onZoomDelete: (id: string) => void;
 	selectedZoomId: string | null;

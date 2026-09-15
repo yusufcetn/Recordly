@@ -1,3 +1,4 @@
+import { normalizeCaret } from "../../../src/lib/caret";
 import fs from "node:fs/promises";
 import {
 	CURSOR_SAMPLE_INTERVAL_MS,
@@ -24,6 +25,7 @@ import {
 } from "../state";
 import type { CursorInteractionType, CursorTelemetryPoint, CursorVisualType } from "../types";
 import { getScreen, getTelemetryPathForVideo } from "../utils";
+import { getCapturedCaret, resetCaretCapture } from "./caret";
 
 export function clamp(value: number, min: number, max: number) {
 	return Math.min(max, Math.max(min, value));
@@ -42,6 +44,7 @@ export function normalizeCursorTelemetrySamples(rawSamples: unknown): CursorTele
 		.map((sample: unknown) => {
 			const point = sample as Partial<CursorTelemetryPoint>;
 			return {
+				...(point.caret !== undefined ? { caret: normalizeCaret(point.caret) } : {}),
 				timeMs:
 					typeof point.timeMs === "number" && Number.isFinite(point.timeMs)
 						? Math.max(0, point.timeMs)
@@ -106,6 +109,7 @@ export function stopCursorCapture() {
 }
 
 export function resetCursorCaptureClock() {
+	resetCaretCapture();
 	setCursorCaptureAccumulatedPausedMs(0);
 	setCursorCapturePauseStartedAtMs(null);
 }
@@ -250,6 +254,7 @@ export function pushCursorSample(
 		cy,
 		interactionType,
 		cursorType: cursorType ?? currentCursorVisualType,
+		caret: isCursorCapturePaused() ? null : getCapturedCaret(),
 	} as CursorTelemetryPoint);
 
 	if (activeCursorSamples.length > MAX_CURSOR_SAMPLES) {
