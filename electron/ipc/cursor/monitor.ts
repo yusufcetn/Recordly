@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { BrowserWindow } from "electron";
+import { USER_DATA_PATH } from "../../appPaths";
 import { ensureNativeCursorMonitorBinary, getCursorMonitorExePath } from "../paths/binaries";
 import {
 	currentCursorVisualType,
@@ -24,12 +26,25 @@ export function emitCursorStateChanged(cursorType: CursorVisualType) {
 	});
 }
 
+/** Which caret source each app provides; bundle IDs and roles only, never text. */
+const CARET_DEBUG_LOG_PATH = path.join(USER_DATA_PATH, "caret-debug.log");
+
+function appendCaretDebugLine(detail: string) {
+	void fs
+		.appendFile(CARET_DEBUG_LOG_PATH, `${new Date().toISOString()} ${detail}\n`, "utf8")
+		.catch(() => undefined);
+}
+
 export function handleCursorMonitorStdout(chunk: Buffer) {
 	setNativeCursorMonitorOutputBuffer(nativeCursorMonitorOutputBuffer + chunk.toString());
 	const lines = nativeCursorMonitorOutputBuffer.split(/\r?\n/);
 	setNativeCursorMonitorOutputBuffer(lines.pop() ?? "");
 
 	for (const line of lines) {
+		if (line.startsWith("CARET_DEBUG:")) {
+			appendCaretDebugLine(line.slice("CARET_DEBUG:".length));
+			continue;
+		}
 		if (acceptCaretMessage(line)) continue;
 		const permission = parseCursorHelperPermissionLine(line);
 		if (permission) {

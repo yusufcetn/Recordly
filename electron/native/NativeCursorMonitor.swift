@@ -421,120 +421,345 @@ if CommandLine.arguments.contains("--check-permissions") {
 }
 
 let caretMessagingTimeout: Float = 0.08
+/// How long the camera keeps following after the last keystroke or caret move.
+let typingHoldSeconds: TimeInterval = 1.0
 
-struct TextCaret {
-	let element: AXUIElement
-	let rect: CGRect
+/// Where a caret position came from, from most to least precise.
+enum CaretSource: String {
+	/// AXBoundsForRange: native text fields and text views.
+	case textRange = "text-range"
+	/// AXBoundsForTextMarkerRange: web content in WebKit, Chromium and Gecko.
+	case textMarker = "text-marker"
+	/// The focused text field's frame, for apps that expose the field but no caret.
+	case element
+	/// The last click in the focused app, for apps that expose nothing: users
+	/// usually click a field before typing.
+	case pointer
 }
 
-func frontmostApplicationPid() -> pid_t? {
+struct CaretLocation {
+	let element: AXUIElement?
+	let point: CGPoint
+	let source: CaretSource
+}
+
+func frontmostApplication() -> NSRunningApplication? {
 	if Thread.isMainThread {
-		return NSWorkspace.shared.frontmostApplication?.processIdentifier
+		return NSWorkspace.shared.frontmostApplication
 	}
-	return DispatchQueue.main.sync { NSWorkspace.shared.frontmostApplication?.processIdentifier }
+	return DispatchQueue.main.sync { NSWorkspace.shared.frontmostApplication }
+}
+
+// Chromium and Electron only build their accessibility tree for assistive
+// technology; AXManualAccessibility asks for it and other apps ignore it.
+// Gecko (Firefox, Zen, ...) ignores that and only honours AXEnhancedUserInterface,
+// which also changes window behaviour, so it is set for Gecko apps only and
+// cleared again when the monitor stops.
+let enhancedUserInterfaceLock = NSLock()
+var enhancedUserInterfaceApps: [pid_t: AXUIElement] = [:]
+
+func isGeckoApplication(_ app: NSRunningApplication) -> Bool {
+	guard let bundleURL = app.bundleURL else { return false }
+	return FileManager.default.fileExists(atPath: bundleURL.appendingPathComponent("Contents/MacOS/XUL").path)
+}
+
+func requestAccessibilityTree(_ app: NSRunningApplication, _ element: AXUIElement) {
+	AXUIElementSetAttributeValue(element, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+	guard isGeckoApplication(app) else { return }
+	enhancedUserInterfaceLock.lock()
+	defer { enhancedUserInterfaceLock.unlock() }
+	if enhancedUserInterfaceApps[app.processIdentifier] == nil,
+		AXUIElementSetAttributeValue(element, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue) == .success {
+		enhancedUserInterfaceApps[app.processIdentifier] = element
+	}
+}
+
+func restoreEnhancedUserInterface() {
+	enhancedUserInterfaceLock.lock()
+	defer { enhancedUserInterfaceLock.unlock() }
+	for element in enhancedUserInterfaceApps.values {
+		AXUIElementSetAttributeValue(element, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+	}
+	enhancedUserInterfaceApps.removeAll()
 }
 
 // Query the frontmost app rather than the system-wide element: a messaging
 // timeout set on the system-wide element becomes the global timeout for every
 // AX call in this process, including cursor-type detection.
-var cachedCaretApplication: (pid: pid_t, element: AXUIElement)?
-func frontmostApplicationElement() -> AXUIElement? {
-	guard let pid = frontmostApplicationPid() else {
+var cachedCaretApplication: (pid: pid_t, bundleId: String, element: AXUIElement)?
+func frontmostApplicationElement() -> (bundleId: String, element: AXUIElement)? {
+	guard let app = frontmostApplication() else {
 		cachedCaretApplication = nil
 		return nil
 	}
+	let pid = app.processIdentifier
 	if let cached = cachedCaretApplication, cached.pid == pid {
-		return cached.element
+		return (cached.bundleId, cached.element)
 	}
 	let element = AXUIElementCreateApplication(pid)
 	AXUIElementSetMessagingTimeout(element, caretMessagingTimeout)
-	cachedCaretApplication = (pid, element)
-	return element
+	requestAccessibilityTree(app, element)
+	let bundleId = app.bundleIdentifier ?? "pid-\(pid)"
+	cachedCaretApplication = (pid, bundleId, element)
+	return (bundleId, element)
 }
 
-// Only geometry is emitted: never read AXValue or the typed characters.
-func textCaret(in root: AXUIElement) -> TextCaret? {
+func focusedElement(of app: AXUIElement) -> AXUIElement? {
 	var focused: CFTypeRef?
-	guard AXUIElementCopyAttributeValue(root, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+	guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
 		let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
 	let element = focused as! AXUIElement
 	AXUIElementSetMessagingTimeout(element, caretMessagingTimeout)
-	// Secure inputs and non-editable content must not move the camera.
-	let role = attributeString(element, kAXRoleAttribute) ?? ""
-	let subrole = attributeString(element, kAXSubroleAttribute) ?? ""
-	guard !subrole.lowercased().contains("secure"),
-		["AXTextField", "AXTextArea", "AXComboBox"].contains(role)
-			|| attributeBool(element, axEditableAttribute) == true else { return nil }
+	return element
+}
+
+func isPlausibleCaretRect(_ rect: CGRect) -> Bool {
+	return rect.origin.x.isFinite && rect.origin.y.isFinite && rect.width.isFinite
+		&& rect.height.isFinite && rect.width >= 0 && rect.width <= 32
+		&& rect.height > 0 && rect.height < 200
+}
+
+func rectValue(_ value: CFTypeRef?) -> CGRect? {
+	guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+	var rect = CGRect.zero
+	return AXValueGetValue(value as! AXValue, .cgRect, &rect) ? rect : nil
+}
+
+// Only geometry is read here: never AXValue, the selected text or typed characters.
+func textRangeCaretRect(_ element: AXUIElement) -> CGRect? {
 	var value: CFTypeRef?
 	guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
 		let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
 	var range = CFRange()
 	guard AXValueGetValue(value as! AXValue, .cfRange, &range), range.location >= 0,
-		range.length == 0 else { return nil }
-	guard let parameter = AXValueCreate(.cfRange, &range) else { return nil }
+		range.length == 0, let parameter = AXValueCreate(.cfRange, &range) else { return nil }
 	var result: CFTypeRef?
 	guard AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString, parameter, &result) == .success,
-		let result, CFGetTypeID(result) == AXValueGetTypeID() else { return nil }
-	var rect = CGRect.zero
-	guard AXValueGetValue(result as! AXValue, .cgRect, &rect),
-		rect.origin.x.isFinite, rect.origin.y.isFinite, rect.width.isFinite,
-		rect.height.isFinite, rect.width >= 0, rect.width <= 32,
-		rect.height > 0, rect.height < 200 else { return nil }
-	return TextCaret(element: element, rect: rect)
+		let rect = rectValue(result), isPlausibleCaretRect(rect) else { return nil }
+	return rect
+}
+
+func textMarkerCaretRect(_ element: AXUIElement) -> CGRect? {
+	var markerRange: CFTypeRef?
+	guard AXUIElementCopyAttributeValue(element, "AXSelectedTextMarkerRange" as CFString, &markerRange) == .success,
+		let markerRange else { return nil }
+	var result: CFTypeRef?
+	guard AXUIElementCopyParameterizedAttributeValue(element, "AXBoundsForTextMarkerRange" as CFString, markerRange, &result) == .success,
+		let rect = rectValue(result), isPlausibleCaretRect(rect) else { return nil }
+	return rect
+}
+
+func isTextInput(role: String, element: AXUIElement) -> Bool {
+	return ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"].contains(role)
+		|| attributeBool(element, axEditableAttribute) == true
+}
+
+func textInputFrame(_ element: AXUIElement) -> CGRect? {
+	var positionValue: CFTypeRef?
+	var sizeValue: CFTypeRef?
+	guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue) == .success,
+		AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success,
+		let positionValue, let sizeValue,
+		CFGetTypeID(positionValue) == AXValueGetTypeID(), CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return nil }
+	var position = CGPoint.zero
+	var size = CGSize.zero
+	guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &position),
+		AXValueGetValue(sizeValue as! AXValue, .cgSize, &size),
+		size.width > 0, size.height > 0,
+		// A whole editor or web page is too big to say where the typing is.
+		size.height < 400 else { return nil }
+	return CGRect(origin: position, size: size)
+}
+
+/// The caret as reported by accessibility; nil when the app exposes nothing usable.
+func accessibilityCaret(in app: AXUIElement) -> (location: CaretLocation?, role: String) {
+	guard let element = focusedElement(of: app) else { return (nil, "no-focus") }
+	let role = attributeString(element, kAXRoleAttribute) ?? "unknown"
+	let subrole = attributeString(element, kAXSubroleAttribute) ?? ""
+	// Secure inputs must not move the camera.
+	if subrole.lowercased().contains("secure") { return (nil, "secure") }
+	if let rect = textRangeCaretRect(element) {
+		return (CaretLocation(element: element, point: CGPoint(x: rect.midX, y: rect.midY), source: .textRange), role)
+	}
+	if let rect = textMarkerCaretRect(element) {
+		return (CaretLocation(element: element, point: CGPoint(x: rect.midX, y: rect.midY), source: .textMarker), role)
+	}
+	if isTextInput(role: role, element: element), let frame = textInputFrame(element) {
+		return (CaretLocation(element: element, point: CGPoint(x: frame.midX, y: frame.midY), source: .element), role)
+	}
+	return (nil, role)
 }
 
 // A one-shot diagnostic for browser compatibility; it prints geometry only.
 if let index = CommandLine.arguments.firstIndex(of: "--probe-caret") {
-	var root = frontmostApplicationElement()
+	var root = frontmostApplicationElement()?.element
 	if CommandLine.arguments.count > index + 1,
 		let app = NSRunningApplication.runningApplications(withBundleIdentifier: CommandLine.arguments[index + 1]).first {
 		root = AXUIElementCreateApplication(app.processIdentifier)
 		AXUIElementSetMessagingTimeout(root!, caretMessagingTimeout)
+		requestAccessibilityTree(app, root!)
+		// Gecko builds its tree asynchronously after being asked for it.
+		Thread.sleep(forTimeInterval: 0.5)
 	}
-	if let root, let caret = textCaret(in: root) {
-		print("CARET:\(caret.rect.midX):\(caret.rect.midY)")
+	let result = root.map { accessibilityCaret(in: $0) }
+	if let location = result?.location {
+		print("CARET:\(location.point.x):\(location.point.y) source=\(location.source.rawValue) role=\(result!.role)")
 	} else {
-		print("CARET:none trusted=\(AXIsProcessTrusted())")
+		print("CARET:none role=\(result?.role ?? "no-app") trusted=\(AXIsProcessTrusted())")
 	}
+	restoreEnhancedUserInterface()
 	exit(0)
 }
 
+// Typing is detected from two independent signals so that it works in every
+// app: keystrokes (from the event tap) and caret movement (from accessibility,
+// which also catches paste and IME input). A click ends both.
 let typingLock = NSLock()
-var lastTypingTime: TimeInterval = 0
-func markTyping(_ active: Bool) {
+var lastKeystrokeTime: TimeInterval = 0
+var lastCaretMoveTime: TimeInterval = 0
+var lastClickPoint: CGPoint?
+/// App whose window received the last click; resolved lazily off the event tap.
+var lastClickOwnerPid: pid_t?
+var lastClickOwnerResolved = false
+
+func markKeystroke() {
 	typingLock.lock()
-	lastTypingTime = active ? ProcessInfo.processInfo.systemUptime : 0
+	lastKeystrokeTime = ProcessInfo.processInfo.systemUptime
 	typingLock.unlock()
 }
 
-var previousCaret: TextCaret?
+func markCaretMoved(_ moved: Bool) {
+	typingLock.lock()
+	lastCaretMoveTime = moved ? ProcessInfo.processInfo.systemUptime : 0
+	typingLock.unlock()
+}
+
+func markClick(at point: CGPoint) {
+	typingLock.lock()
+	lastKeystrokeTime = 0
+	lastCaretMoveTime = 0
+	lastClickPoint = point
+	lastClickOwnerPid = nil
+	lastClickOwnerResolved = false
+	typingLock.unlock()
+}
+
+// Keys pressed while one of these has focus drive the control (arrow keys in a
+// list, space on a button), they are not typing, so no pointer fallback.
+let nonTextFocusRoles: Set<String> = [
+	"secure", "AXButton", "AXCheckBox", "AXRadioButton", "AXLink", "AXList", "AXTable",
+	"AXOutline", "AXMenu", "AXMenuBar", "AXMenuItem", "AXMenuButton", "AXPopUpButton",
+	"AXSlider", "AXTabGroup", "AXImage", "AXDisclosureTriangle", "AXIncrementor",
+]
+
+/// The app owning the frontmost on-screen window under a point, e.g. the Dock
+/// for a Dock click. Window bounds use the same top-left global coordinates as
+/// CGEvent locations, and reading owner PIDs needs no screen recording access.
+func windowOwnerPid(at point: CGPoint) -> pid_t? {
+	guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+		as? [[String: Any]] else { return nil }
+	for window in windows {
+		guard let boundsDictionary = window[kCGWindowBounds as String] as? NSDictionary,
+			let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
+			bounds.contains(point),
+			let ownerPid = window[kCGWindowOwnerPID as String] as? pid_t else { continue }
+		return ownerPid
+	}
+	return nil
+}
+
+/// The last click, but only if it landed in the app that has focus now. A click
+/// on the Dock or in another app says nothing about where this app's text is.
+func clickPointInFocusedApp(_ pid: pid_t?) -> CGPoint? {
+	typingLock.lock()
+	let point = lastClickPoint
+	let resolved = lastClickOwnerResolved
+	var ownerPid = lastClickOwnerPid
+	typingLock.unlock()
+	guard let point, let pid else { return nil }
+	if !resolved {
+		ownerPid = windowOwnerPid(at: point)
+		typingLock.lock()
+		if lastClickPoint == point {
+			lastClickOwnerPid = ownerPid
+			lastClickOwnerResolved = true
+		}
+		typingLock.unlock()
+	}
+	return ownerPid == pid ? point : nil
+}
+
+var previousCaret: CaretLocation?
+/// The last caret read from a text range or marker, with the time it was read.
+var lastPreciseCaret: (location: CaretLocation, time: TimeInterval)?
+var lastCaretDebug = ""
 func emitTextCaret() {
-	let caret = frontmostApplicationElement().flatMap { textCaret(in: $0) }
-	if let caret {
-		if let previous = previousCaret, CFEqual(previous.element, caret.element) {
-			// Observe insertion-point movement instead of listening to keystrokes.
-			// This also works for paste, IME input and browser automation.
-			if abs(caret.rect.midX - previous.rect.midX) > 0.2
-				|| abs(caret.rect.midY - previous.rect.midY) > 0.2 {
-				markTyping(true)
+	let app = frontmostApplicationElement()
+	let result = app.map { accessibilityCaret(in: $0.element) }
+	var caret = result?.location
+	let readTime = ProcessInfo.processInfo.systemUptime
+
+	// A field can briefly report only its frame (e.g. while a popup opens) between
+	// precise caret reads. Jumping to the frame's centre for one frame makes the
+	// camera twitch, so keep the recent precise caret of that same field instead.
+	if let current = caret, let element = current.element {
+		if current.source == .element {
+			if let precise = lastPreciseCaret, readTime - precise.time < typingHoldSeconds,
+				let preciseElement = precise.location.element, CFEqual(preciseElement, element) {
+				caret = precise.location
 			}
 		} else {
-			markTyping(false)
+			lastPreciseCaret = (current, readTime)
+		}
+	}
+
+	if let caret, caret.source != .element, let element = caret.element {
+		if let previous = previousCaret, let previousElement = previous.element,
+			CFEqual(previousElement, element) {
+			if abs(caret.point.x - previous.point.x) > 0.2 || abs(caret.point.y - previous.point.y) > 0.2 {
+				markCaretMoved(true)
+			}
+		} else {
+			markCaretMoved(false)
 		}
 	} else {
-		markTyping(false)
+		markCaretMoved(false)
 	}
 	previousCaret = caret
+
+	// Resolve click ownership while the window under it is still the same.
+	let clickPoint = clickPointInFocusedApp(cachedCaretApplication?.pid)
 	typingLock.lock()
-	let recentlyTyped = ProcessInfo.processInfo.systemUptime - lastTypingTime < 1.0
+	let now = ProcessInfo.processInfo.systemUptime
+	let isTyping = now - max(lastKeystrokeTime, lastCaretMoveTime) < typingHoldSeconds
 	typingLock.unlock()
-	if recentlyTyped, let caret {
-		print("CARET:\(caret.rect.midX):\(caret.rect.midY)")
+
+	// Without a caret or a click in this app the position is unknown; no zoom
+	// is better than zooming somewhere unrelated.
+	var location = caret
+	if isTyping, location == nil, !nonTextFocusRoles.contains(result?.role ?? "") {
+		location = clickPoint.map { CaretLocation(element: nil, point: $0, source: .pointer) }
+	}
+
+	// Log which caret source each app gives, once per change, so unsupported
+	// apps can be diagnosed from a real recording. Roles only, never text.
+	if isTyping {
+		let debug = "\(app?.bundleId ?? "none"):\(result?.role ?? "none"):\(location?.source.rawValue ?? "none")"
+		if debug != lastCaretDebug {
+			lastCaretDebug = debug
+			print("CARET_DEBUG:\(debug)")
+		}
+	}
+
+	if isTyping, let location {
+		print("CARET:\(location.point.x):\(location.point.y)")
 	} else {
 		print("CARET:none")
 	}
 	fflush(stdout)
 }
+
+var inputEventTap: CFMachPort?
 
 func mouseInteractionCallback(
 	proxy: CGEventTapProxy,
@@ -545,15 +770,29 @@ func mouseInteractionCallback(
 	let action: String
 	let button: Int
 	switch type {
+	case .tapDisabledByTimeout, .tapDisabledByUserInput:
+		// macOS disables a tap it considers slow; without this, clicks and
+		// keystrokes silently stop for the rest of the recording.
+		if let inputEventTap {
+			CGEvent.tapEnable(tap: inputEventTap, enable: true)
+		}
+		return Unmanaged.passUnretained(event)
+	case .keyDown:
+		// Only the fact that a key was pressed is used, never which key.
+		// Shortcuts do not count as typing.
+		if !event.flags.contains(.maskCommand) && !event.flags.contains(.maskControl) {
+			markKeystroke()
+		}
+		return Unmanaged.passUnretained(event)
 	case .leftMouseDown:
-		markTyping(false)
+		markClick(at: event.location)
 		action = "mousedown"
 		button = 1
 	case .leftMouseUp:
 		action = "mouseup"
 		button = 1
 	case .rightMouseDown:
-		markTyping(false)
+		markClick(at: event.location)
 		action = "mousedown"
 		button = 2
 	case .rightMouseUp:
@@ -590,6 +829,7 @@ let mouseEventTypes: [CGEventType] = [
 	.rightMouseUp,
 	.otherMouseDown,
 	.otherMouseUp,
+	.keyDown,
 ]
 let mouseEventMask = mouseEventTypes.reduce(CGEventMask(0)) { mask, type in
 	mask | (CGEventMask(1) << type.rawValue)
@@ -604,6 +844,7 @@ let mouseEventTap = CGEvent.tapCreate(
 )
 if let mouseEventTap,
 	let eventTapSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, mouseEventTap, 0) {
+	inputEventTap = mouseEventTap
 	CFRunLoopAddSource(CFRunLoopGetMain(), eventTapSource, .commonModes)
 	CGEvent.tapEnable(tap: mouseEventTap, enable: true)
 } else {
@@ -631,12 +872,24 @@ timer.setEventHandler {
 }
 timer.resume()
 
+// The app writes "stop" and then sends SIGTERM right away, so the flag set on
+// Gecko apps has to be cleared on the signal too, not only on "stop".
+signal(SIGTERM, SIG_IGN)
+let terminationSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .utility))
+terminationSource.setEventHandler {
+	restoreEnhancedUserInterface()
+	exit(0)
+}
+terminationSource.resume()
+
 DispatchQueue.global(qos: .utility).async {
 	while let line = readLine(strippingNewline: true)?.lowercased() {
 		if line == "stop" {
+			restoreEnhancedUserInterface()
 			exit(0)
 		}
 	}
+	restoreEnhancedUserInterface()
 	exit(0)
 }
 
