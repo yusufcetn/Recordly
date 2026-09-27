@@ -3,9 +3,11 @@ vi.mock("../state", () => ({
 	selectedSource: { id: "screen:1", display_id: "1" },
 	selectedWindowBounds: null,
 }));
+const screenToDipPoint = vi.hoisted(() => vi.fn((point: { x: number; y: number }) => point));
 vi.mock("../utils", () => ({
 	getScreen: () => ({
 		getAllDisplays: () => [{ id: 1, bounds: { x: 0, y: 0, width: 1000, height: 800 } }],
+		screenToDipPoint,
 	}),
 }));
 import {
@@ -13,6 +15,7 @@ import {
 	getCapturedCaret,
 	normalizeCaretToBounds,
 	resetCaretCapture,
+	toDipPoint,
 } from "./caret";
 
 beforeEach(resetCaretCapture);
@@ -41,5 +44,14 @@ describe("native caret capture", () => {
 		expect(
 			normalizeCaretToBounds({ x: 900, y: 100 }, { x: 0, y: 0, width: 800, height: 600 }),
 		).toBeNull();
+	});
+	it("converts Windows physical pixels to DIPs", () => {
+		// 150% scaling: physical pixels are 1.5x DIPs.
+		screenToDipPoint.mockImplementationOnce((point) => ({
+			x: point.x / 1.5,
+			y: point.y / 1.5,
+		}));
+		expect(toDipPoint({ x: 750, y: 300 }, "win32")).toEqual({ x: 500, y: 200 });
+		expect(toDipPoint({ x: 750, y: 300 }, "darwin")).toEqual({ x: 750, y: 300 });
 	});
 });

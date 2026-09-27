@@ -2917,7 +2917,7 @@ export function SettingsPanel({
 											"Set a fixed focus point for this zoom",
 										)
 									: selectedZoomMode === "typing"
-										? "Follow typing in new macOS recordings. Allow Accessibility access before recording."
+										? "Follow the text cursor while typing in new recordings. On macOS, allow Accessibility access first."
 										: tSettings(
 												"zoom.modeAutoDescription",
 												"Camera recenters when the cursor nears the edge of the zoomed view",

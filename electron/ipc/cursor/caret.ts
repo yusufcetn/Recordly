@@ -33,15 +33,24 @@ export function normalizeCaretToBounds(
 		: null;
 }
 
+/**
+ * The Windows helper is per-monitor DPI aware and reports physical pixels, while
+ * display and window bounds here are DIPs (macOS reports points already).
+ */
+export function toDipPoint(point: Point, platform: NodeJS.Platform = process.platform): Point {
+	if (platform !== "win32") return point;
+	const screen = getScreen();
+	return typeof screen.screenToDipPoint === "function" ? screen.screenToDipPoint(point) : point;
+}
+
 export function getCapturedCaret(nowMs = Date.now()) {
 	if (!latestCaret || nowMs - latestCaret.updatedAt > 250) return null;
+	const caret = toDipPoint(latestCaret);
 	if (selectedSource?.id?.startsWith("window:")) {
-		return selectedWindowBounds
-			? normalizeCaretToBounds(latestCaret, selectedWindowBounds)
-			: null;
+		return selectedWindowBounds ? normalizeCaretToBounds(caret, selectedWindowBounds) : null;
 	}
 	const display = getScreen()
 		.getAllDisplays()
 		.find((d) => d.id === Number(selectedSource?.display_id));
-	return display ? normalizeCaretToBounds(latestCaret, display.bounds) : null;
+	return display ? normalizeCaretToBounds(caret, display.bounds) : null;
 }
